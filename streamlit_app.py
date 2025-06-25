@@ -1069,22 +1069,30 @@ with tab5:
         all_event_ts = None
         ohcl_1h = None
         
-        # Load event timestamps
+        # Load event timestamps - only the columns we need
         for file in os.scandir("Intraday_data_files_processed_folder_pq"):
             if file.name == "ZN_1h_events_tagged_target_tz.parquet":
-                all_event_ts = pd.read_parquet(file.path, engine='pyarrow')
+                all_event_ts = pd.read_parquet(
+                    file.path, 
+                    engine='pyarrow',
+                    columns=['timestamp', 'events']  # Only load needed columns
+                )
                 break
         
         if all_event_ts is not None:
             all_event_ts['timestamp'] = pd.to_datetime(all_event_ts.timestamp, errors='coerce').dt.tz_localize('US/Eastern')
         
-        # Load OHLC data
+        # Load OHLC data - only the columns we need
         pattern = re.compile(r"Intraday_data_ZN_1h_2022-12-20_to_(\d{4}-\d{2}-\d{2})\.parquet")
         for file in os.scandir('Intraday_data_files_pq'):
             if file.is_file():
                 match = pattern.match(file.name)
                 if match:
-                    ohcl_1h = pd.read_parquet(os.path.join("Intraday_data_files_pq", file.name), engine='pyarrow')
+                    ohcl_1h = pd.read_parquet(
+                        os.path.join("Intraday_data_files_pq", file.name), 
+                        engine='pyarrow',
+                        columns=['Open', 'High', 'Low', 'Close']  # Only load OHLC columns
+                    )
                     break
         
         if ohcl_1h is not None:
