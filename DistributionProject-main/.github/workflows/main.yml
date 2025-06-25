@@ -1,0 +1,73 @@
+name: Daily Python Script Run
+
+on:
+  push:
+     branches:
+       - main # Runs on push to the main branch
+  schedule:
+    - cron: '0 * * * *'  # Runs every hour
+    
+  workflow_dispatch:  #option for manual trigger
+
+jobs:
+  run-python:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Check out repository
+      uses: actions/checkout@v3  # Use v3 for the latest version
+
+    - name: Set up Python
+      uses: actions/setup-python@v3
+      with:
+        python-version: '3.12.2'  # Use the specific version of Python you need
+
+    - name: Restore cached Python dependencies
+      uses: actions/cache@v3
+      with:
+        path: ~/.cache/pip
+        key: python-${{ runner.os }}-${{ hashFiles('requirements.txt') }}
+        restore-keys: |
+          python-${{ runner.os }}-
+
+    - name: Install dependencies
+      run: pip install --no-cache-dir -r requirements.txt 
+
+    - name: Show disk space after caching
+      run: df -h
+
+    - name: Save cache after installing dependencies
+      uses: actions/cache@v3
+      with:
+        path: ~/.cache/pip
+        key: python-${{ runner.os }}-${{ hashFiles('requirements.txt') }}
+        
+    - name: Run Python script
+      run: python periodic_runner_main_github_actions.py  # Replace with your actual Python script name
+
+    - name: Configure Git user
+      run: |
+        git config --global user.name "krishangguptafibonacciresearch"  # Replace with your name
+        git config --global user.email "krishanggupta@fibonacciresearch.in"  # Replace with your email
+
+
+    - name: Pull latest changes to avoid conflicts
+      run: |
+        git fetch origin main
+        git stash  # Temporarily saves local changes
+        git pull --rebase origin main || echo "No updates available"
+        git stash pop || echo "No stashed changes"
+
+    - name: Check if both folders have files and commit changes
+      run: |
+        # Check if  folders exist and contain files
+        if [ -d "Intraday_data_files_pq" ] && [ "$(ls -A Intraday_data_files_pq)" ]; then
+          echo "Folders with files detected, committing changes"
+          git add .
+          git commit -m "Add new folders and files created by Python script"
+          git push
+        else
+          echo "Folders do not have files, skipping commit"
+        fi
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

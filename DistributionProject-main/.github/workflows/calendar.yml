@@ -1,0 +1,70 @@
+name: Hourly Run Trading Economics Calendar
+
+on:
+  push:
+    branches:
+      - main  # Runs on push to the main branch
+  schedule:
+    - cron: '0 * * * *'  # Runs every hour
+
+  workflow_dispatch: # Allows manual triggering of the workflow. Helps is debugging.
+
+jobs:
+  run-python:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Check out repository
+      uses: actions/checkout@v3
+      with:
+        fetch-depth: 1  # Fetch only the latest changes.
+
+    - name: Set up Python
+      uses: actions/setup-python@v3
+      with:
+        python-version: '3.12.2'  # Use the specific Python version needed
+
+    - name: Restore cached Python dependencies
+      uses: actions/cache@v3
+      with:
+        path: ~/.cache/pip
+        key: python-${{ runner.os }}-${{ hashFiles('requirements.txt') }}
+        restore-keys: |
+          python-${{ runner.os }}-
+
+    - name: Install dependencies
+      run: pip install --no-cache-dir -r requirements.txt
+
+    - name: Save cache after installing dependencies
+      uses: actions/cache@v3
+      with:
+        path: ~/.cache/pip
+        key: python-${{ runner.os }}-${{ hashFiles('requirements.txt') }}
+
+    - name: Run Python script
+      run: python event_calendar_runner_main_github_actions.py  # Replace with your script name
+
+    - name: Configure Git user
+      run: |
+        git config --global user.name "krishangguptafibonacciresearch"
+        git config --global user.email "krishanggupta@fibonacciresearch.in"
+
+    - name: Pull latest changes to avoid conflicts
+      run: |
+        git fetch origin main
+        git stash  # Temporarily saves local changes
+        git pull --rebase origin main || echo "No updates available"
+        git stash pop || echo "No stashed changes"
+
+    - name: Check if Input_data folder has files and commit changes
+      run: |
+        if [ -d "Input_data" ] && [ "$(ls -A Input_data)" ]; then
+          echo "Folders with files detected, committing changes"
+          git add .
+          git commit -m "Add new stats/plots folders and files created by Python script" || echo "No changes to commit"
+          git push origin main
+        else
+          echo "Folders do not have files, skipping commit"
+        fi
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -1,0 +1,14 @@
+openpyxl #compuslory to have if streamlit cloud is to be used along with csv and images downloading thing.
+numpy
+pandas
+pillow
+seaborn
+yfinance
+matplotlib
+streamlit
+scipy
+pyvirtualdisplay #compulsory for selenium, add in workflow file too
+chromedriver-autoinstaller #compulsory for selenium,add in workflow file too
+bs4 #compulsory for selenium, add in workflow file too
+selenium
+tzlocal
