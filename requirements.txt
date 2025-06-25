@@ -12,3 +12,6 @@ chromedriver-autoinstaller #compulsory for selenium,add in workflow file too
 bs4 #compulsory for selenium, add in workflow file too
 selenium
 tzlocal
+psutil
+plotly
+scikit-learn

@@ -17,6 +17,12 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 import numpy as np
 import gc  # For memory management
+import psutil  # For memory monitoring
+import plotly.graph_objects as go
+import plotly.figure_factory as ff
+from plotly.subplots import make_subplots
+from scipy import stats as scipy_stats
+from sklearn.neighbors import KernelDensity
 
 # Setting up page configuration - MUST BE FIRST STREAMLIT COMMAND
 st.set_page_config(
@@ -25,6 +31,25 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="expanded",
 )
+
+# Memory monitoring function
+def check_memory_and_cleanup():
+    """Check memory usage and force cleanup if approaching limit"""
+    process = psutil.Process()
+    mem_mb = process.memory_info().rss / 1024 / 1024
+    
+    if mem_mb > 2000:  # 2GB hard limit
+        # Force aggressive cleanup
+        plt.close('all')  # Close all matplotlib figures
+        gc.collect()
+        
+        # If still over limit, clear some caches
+        if process.memory_info().rss / 1024 / 1024 > 2000:
+            st.cache_data.clear()
+            gc.collect()
+            st.warning("Memory limit reached. Cleared caches to prevent crash.")
+    
+    return mem_mb
 
 # Defining custom functions to modify generated data as per user input
 def get_volatility_returns_csv_stats_custom_days(target_csv,target_column):
@@ -229,16 +254,29 @@ def calc_event_spec_returns(selected_event , all_event_ts , ohcl_1h , mode , eve
     cutoff_time = pd.to_datetime('2022-12-20 00:00:00-05:00', errors='coerce')
     event_ts = event_ts[event_ts['start'] >= cutoff_time]
 
+    # Check memory before processing
+    check_memory_and_cleanup()
+    
     # Pre-allocate numpy arrays for better memory efficiency
     n_events = len(event_ts)
+    
+    # For large event sets (like NFP), process in smaller chunks
+    if n_events > 100:
+        st.info(f"Processing {n_events} events. This may take a moment...")
+        batch_size = 25  # Smaller batches for large datasets
+        
+        # For very large datasets, use even smaller batches to prevent memory spikes
+        if n_events > 200:
+            batch_size = 10
+            st.info("Using optimized processing for large dataset...")
+    else:
+        batch_size = 50
+    
     vol_ret = np.empty(n_events, dtype=np.float32)
     abs_ret = np.empty(n_events, dtype=np.float32)
     ret = np.empty(n_events, dtype=np.float32)
     start_date = []
     end_date = []
-    
-    # Process events in batches to reduce memory peaks
-    batch_size = 50  # Process 50 events at a time
     
     for i, (end, start) in enumerate(zip(event_ts['end'], event_ts['start'])):
         # More efficient filtering using index slicing if possible
@@ -266,7 +304,17 @@ def calc_event_spec_returns(selected_event , all_event_ts , ohcl_1h , mode , eve
         
         # Clean up memory every batch_size iterations
         if (i + 1) % batch_size == 0:
-            gc.collect()
+            # Check memory usage mid-processing
+            current_mem = psutil.Process().memory_info().rss / 1024 / 1024
+            if current_mem > 1800:  # Getting close to 2GB limit
+                st.warning(f"High memory usage detected ({current_mem:.0f}MB). Cleaning up...")
+                plt.close('all')
+                gc.collect()
+                
+                # If still high after cleanup, reduce batch size
+                if psutil.Process().memory_info().rss / 1024 / 1024 > 1800:
+                    batch_size = max(10, batch_size // 2)
+                    st.info(f"Reduced batch size to {batch_size} to prevent crashes")
     
     # Create DataFrame from arrays
     final_df = pd.DataFrame({
@@ -289,118 +337,191 @@ def calc_event_spec_returns(selected_event , all_event_ts , ohcl_1h , mode , eve
 
     return final_df
         
-#5.2 plot the event specific returns
+#5.2 plot the event specific returns using Plotly (client-side rendering)
 def plot_event_spec_returns(final_df , selected_event , dur):
-        
-    figures = {}
-
+    # Check memory before plotting
+    check_memory_and_cleanup()
+    
+    # Create subplots for the three distributions
+    fig = make_subplots(
+        rows=1, cols=3,
+        subplot_titles=["Absolute Return", "Return", "Volatility Return"],
+        horizontal_spacing=0.1
+    )
+    
+    col_idx = 0
     for col in final_df.columns[:3]:
-        fig, ax = plt.subplots(figsize=(6, 4))
+        col_idx += 1
         
-        # Plot histogram and KDE
-        sns.histplot(final_df[col], kde=True, stat="density", linewidth=0, color="skyblue", ax=ax)
-        sns.kdeplot(final_df[col], color="darkblue", linewidth=2, ax=ax)
-
-        #number of instances.
-        print(len(final_df[col]))  
-
-                # Annotate histogram bars with bin edges (left-right) on top of each bar
-        for patch in ax.patches:
-            height = patch.get_height()
-            if height == 0:
-                continue  # skip bars with zero height
-            left = patch.get_x()
-            right = left + patch.get_width()
-            x_center = left + patch.get_width() / 2
-            label = f"{left:.2f} - {right:.2f}"
-            ax.annotate(
-                label,
-                xy=(x_center, 0),
-                xytext=(0, 5),
-                textcoords="offset points",
-                ha='center',
-                fontsize=4,
-                color='black'
-            )
-
-
+        # Get data for this column
+        data = final_df[col].dropna()
+        
         # Statistics
-        stats = final_df[col].describe()
+        stats = data.describe()
         mean = stats['mean']
         std = stats['std']
-        current_value = final_df[col].iloc[-1]
+        current_value = data.iloc[-1]
         current_date = final_df['Start_Date'].iloc[-1].date()
-
-        # idx_val = final_df.index[-1]
-        # if isinstance(idx_val, pd.Timestamp):
-        #     current_date = idx_val.strftime('%Y-%m-%d')
-        # else:
-        #     current_date = str(idx_val)  # fallback if index is not datetime
-
         zscore = (current_value - mean) / std if std != 0 else 0
-
-        # Red dot just above x-axis
-        _ , y_max = ax.get_ylim()
+        
+        # Create histogram
+        hist, bin_edges = np.histogram(data, bins='auto', density=True)
+        bin_centers = (bin_edges[:-1] + bin_edges[1:]) / 2
+        
+        # Add histogram bars
+        fig.add_trace(
+            go.Bar(
+                x=bin_centers,
+                y=hist,
+                name='',
+                marker_color='skyblue',
+                width=bin_edges[1] - bin_edges[0],
+                showlegend=False,
+                text=[f"{bin_edges[i]:.2f}-{bin_edges[i+1]:.2f}" for i in range(len(hist))],
+                textposition='outside',
+                textfont=dict(size=7),
+                hovertemplate='%{text}<br>Density: %{y:.3f}<extra></extra>'
+            ),
+            row=1, col=col_idx
+        )
+        
+        # Calculate KDE for smooth curve
+        # Extend the range beyond data min/max to match matplotlib behavior
+        data_range = data.max() - data.min()
+        kde_padding = data_range * 0.2  # Add 20% padding on each side
+        kde_x = np.linspace(data.min() - kde_padding, data.max() + kde_padding, 200)
+        kde = scipy_stats.gaussian_kde(data)
+        kde_y = kde(kde_x)
+        
+        # Add KDE curve
+        fig.add_trace(
+            go.Scatter(
+                x=kde_x,
+                y=kde_y,
+                mode='lines',
+                name='',
+                line=dict(color='darkblue', width=2),
+                showlegend=False,
+                hovertemplate='Value: %{x:.2f}<br>Density: %{y:.3f}<extra></extra>'
+            ),
+            row=1, col=col_idx
+        )
+        
+        # Add vertical line at current value
+        fig.add_vline(
+            x=current_value,
+            line=dict(color="red", width=1, dash="dot"),
+            row=1, col=col_idx
+        )
+        
+        # Add red dot just above x-axis
+        y_max = max(max(hist), max(kde_y))
         dot_y = y_max * 0.02
-
-        # Red dot and vertical line
-        ax.plot(current_value, dot_y, 'ro', label='Current Value')
-        ax.axvline(x=current_value, color='red', linestyle='dotted', linewidth=1)
-
-        # Annotate with current value, z-score, percentile, and date
-        annotation_text = (
-            f"Value: {current_value:.2f}, "
-            f"Z: {zscore:.2f}, "
-            f"Date: {current_date}"
+        
+        fig.add_trace(
+            go.Scatter(
+                x=[current_value],
+                y=[dot_y],
+                mode='markers',
+                marker=dict(color='red', size=8),
+                showlegend=False,
+                hovertemplate=f'Current Value<br>Value: {current_value:.2f}<br>Z-Score: {zscore:.2f}<br>Date: {current_date}<extra></extra>'
+            ),
+            row=1, col=col_idx
         )
-        ax.annotate(
-            annotation_text,
-            xy=(current_value, dot_y),
-            xytext=(current_value, y_max * 0.15),
-            arrowprops=dict(facecolor='red', arrowstyle='->'),
-            fontsize=9,
-            fontweight='bold',
-            color='red',
-            ha='center'
+        
+        # Define xref and yref based on column index
+        if col_idx == 1:
+            xref = "x"
+            yref = "y"
+            xref_domain = "x domain"
+            yref_domain = "y domain"
+        else:
+            xref = f"x{col_idx}"
+            yref = f"y{col_idx}"
+            xref_domain = f"x{col_idx} domain"
+            yref_domain = f"y{col_idx} domain"
+        
+        # Add annotation with arrow
+        fig.add_annotation(
+            x=current_value,
+            y=y_max * 0.15,
+            text=f"Value: {current_value:.2f}, Z: {zscore:.2f}, Date: {current_date}",
+            showarrow=True,
+            arrowhead=2,
+            arrowcolor='red',
+            arrowwidth=1.5,
+            ax=0,
+            ay=-30,
+            font=dict(color='red', size=11),
+            xref=xref,
+            yref=yref
         )
-
+        
         # Add statistics box
-        textstr = (
-            f"Mean: {mean:.2f}\n"
-            f"Std: {std:.2f}\n"
-            f"Min: {stats['min']:.2f}\n"
-            f"25%: {stats['25%']:.2f}\n"
-            f"Median: {stats['50%']:.2f}\n"
-            f"75%: {stats['75%']:.2f}\n"
-            f"95%: {final_df[col].quantile(0.95):.2f}\n"
-            f"99%: {final_df[col].quantile(0.99):.2f}\n"
+        stats_text = (
+            f"Mean: {mean:.2f}<br>"
+            f"Std: {std:.2f}<br>"
+            f"Min: {stats['min']:.2f}<br>"
+            f"25%: {stats['25%']:.2f}<br>"
+            f"Median: {stats['50%']:.2f}<br>"
+            f"75%: {stats['75%']:.2f}<br>"
+            f"95%: {data.quantile(0.95):.2f}<br>"
+            f"99%: {data.quantile(0.99):.2f}<br>"
             f"Max: {stats['max']:.2f}"
         )
-
-        ax.text(0.75, 0.75, textstr, transform=ax.transAxes, fontsize=10, 
-                verticalalignment='top', bbox=dict(boxstyle='round,pad=0.3', edgecolor='black', facecolor='white'))
-
-        ax.set_xlabel("Value")
-        ax.set_ylabel("Density")
-        ax.set_title(f"{col}")
-
-        figures[col] = fig
         
-    st.title("Distribution Analysis")
+        fig.add_annotation(
+            text=stats_text,
+            xref=xref_domain,
+            yref=yref_domain,
+            x=0.95,
+            y=0.95,
+            xanchor='right',
+            yanchor='top',
+            showarrow=False,
+            bordercolor='black',
+            borderwidth=1,
+            bgcolor='white',
+            font=dict(size=10)
+        )
+        
+        # Update axes
+        fig.update_xaxes(title_text="Value", row=1, col=col_idx)
+        if col_idx == 1:
+            fig.update_yaxes(title_text="Density", row=1, col=col_idx)
+        
+        # Set y-axis range with padding to match matplotlib
+        y_padding = y_max * 0.1
+        fig.update_yaxes(range=[0, y_max + y_padding], row=1, col=col_idx)
+    
+    # Update layout
+    fig.update_layout(
+        height=400,
+        showlegend=False,
+        title={
+            'text': 'Distribution Analysis',
+            'x': 0,
+            'xanchor': 'left',
+            'font': {'size': 24}
+        }
+    )
+    
+    # Display the figure
+    st.plotly_chart(fig, use_container_width=True)
+    
+    # Add explanations below
     col1, col2, col3 = st.columns(3)
-
-    # Display each figure in a separate column
     with col1:
-        st.pyplot(figures["Absolute Return"])
         st.write("**Absolute Return = [abs(close-open)]**")
-
     with col2:
-        st.pyplot(figures["Return"])
         st.write("**Return = [close - open]**")
-
     with col3:
-        st.pyplot(figures["Volatility Return"])
         st.write("**Volatility Return = [high - low]**")
+    
+    # Clean up memory after plotting
+    del fig
+    gc.collect()
 
     
 # Setting up tabs
@@ -1091,6 +1212,10 @@ with tab4:
 with tab5:
     st.title('Event Specific Distro')
     
+    # Clean up any lingering matplotlib figures from other tabs
+    plt.close('all')
+    gc.collect()
+    
     # Define a cached function to load event data with memory optimization
     @st.cache_data
     def load_event_data():
@@ -1172,10 +1297,15 @@ with tab5:
         custom = st.checkbox('Custom time')
         if(custom):
             delta = st.number_input("Enter the number of hours:", min_value=-1000, max_value=1000 , value=0, step=1)
-            final_df = calc_event_spec_returns(selected_event, all_event_ts, ohcl_1h , 3 , events, delta, filter_isolated , 2)
+            with st.spinner(f'Processing {selected_event} data... This may take a moment for events with many occurrences.'):
+                final_df = calc_event_spec_returns(selected_event, all_event_ts, ohcl_1h , 3 , events, delta, filter_isolated , 2)
         else:
-            final_df = calc_event_spec_returns(selected_event, all_event_ts, ohcl_1h , my_dict[dur], events, 0 , filter_isolated , 2)
+            with st.spinner(f'Processing {selected_event} data... This may take a moment for events with many occurrences.'):
+                final_df = calc_event_spec_returns(selected_event, all_event_ts, ohcl_1h , my_dict[dur], events, 0 , filter_isolated , 2)
 
+        # Check memory before plotting
+        check_memory_and_cleanup()
+        
         plot_event_spec_returns(final_df , selected_event , dur)
 
 ##########################################################
