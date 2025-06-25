@@ -262,13 +262,13 @@ def calc_event_spec_returns(selected_event , all_event_ts , ohcl_1h , mode , eve
     
     # For large event sets (like NFP), process in smaller chunks
     if n_events > 100:
-        st.info(f"Processing {n_events} events. This may take a moment...")
+        # st.info(f"Processing {n_events} events. This may take a moment...")
         batch_size = 25  # Smaller batches for large datasets
         
         # For very large datasets, use even smaller batches to prevent memory spikes
         if n_events > 200:
             batch_size = 10
-            st.info("Using optimized processing for large dataset...")
+            # st.info("Using optimized processing for large dataset...")
     else:
         batch_size = 50
     
@@ -307,14 +307,14 @@ def calc_event_spec_returns(selected_event , all_event_ts , ohcl_1h , mode , eve
             # Check memory usage mid-processing
             current_mem = psutil.Process().memory_info().rss / 1024 / 1024
             if current_mem > 1800:  # Getting close to 2GB limit
-                st.warning(f"High memory usage detected ({current_mem:.0f}MB). Cleaning up...")
+                # st.warning(f"High memory usage detected ({current_mem:.0f}MB). Cleaning up...")
                 plt.close('all')
                 gc.collect()
                 
                 # If still high after cleanup, reduce batch size
                 if psutil.Process().memory_info().rss / 1024 / 1024 > 1800:
                     batch_size = max(10, batch_size // 2)
-                    st.info(f"Reduced batch size to {batch_size} to prevent crashes")
+                    # st.info(f"Reduced batch size to {batch_size} to prevent crashes")
     
     # Create DataFrame from arrays
     final_df = pd.DataFrame({
@@ -1297,15 +1297,14 @@ with tab5:
         custom = st.checkbox('Custom time')
         if(custom):
             delta = st.number_input("Enter the number of hours:", min_value=-1000, max_value=1000 , value=0, step=1)
-            with st.spinner(f'Processing {selected_event} data... This may take a moment for events with many occurrences.'):
-                final_df = calc_event_spec_returns(selected_event, all_event_ts, ohcl_1h , 3 , events, delta, filter_isolated , 2)
+            final_df = calc_event_spec_returns(selected_event, all_event_ts, ohcl_1h , 3 , events, delta, filter_isolated , 2)
+            # Check memory before plotting
+            check_memory_and_cleanup()
+            plot_event_spec_returns(final_df , selected_event , dur)
         else:
-            with st.spinner(f'Processing {selected_event} data... This may take a moment for events with many occurrences.'):
-                final_df = calc_event_spec_returns(selected_event, all_event_ts, ohcl_1h , my_dict[dur], events, 0 , filter_isolated , 2)
-
-        # Check memory before plotting
-        check_memory_and_cleanup()
-        
-        plot_event_spec_returns(final_df , selected_event , dur)
+            final_df = calc_event_spec_returns(selected_event, all_event_ts, ohcl_1h , my_dict[dur], events, 0 , filter_isolated , 2)
+            # Check memory before plotting
+            check_memory_and_cleanup()
+            plot_event_spec_returns(final_df , selected_event , dur)
 
 ##########################################################
