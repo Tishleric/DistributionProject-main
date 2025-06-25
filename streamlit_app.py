@@ -16,6 +16,7 @@ from datetime import datetime
 import matplotlib.pyplot as plt
 import seaborn as sns
 import numpy as np
+import gc  # For memory management
 
 # Setting up page configuration - MUST BE FIRST STREAMLIT COMMAND
 st.set_page_config(
@@ -134,11 +135,18 @@ def add_start_end_ts(all_event_ts , delta):
     return all_event_ts
     
 #5.1 calculating the returns for event specific distros
+@st.cache_data
 def calc_event_spec_returns(selected_event , all_event_ts , ohcl_1h , mode , event_list, delta = 0, filter_out_other_events=False,  time_gap_hours=2):
-
-    event_ts = all_event_ts.copy()
-
-    event_ts.events = event_ts.events.astype(str)
+    
+    # Work with views instead of copies when possible to save memory
+    event_ts = all_event_ts
+    
+    # Only create a copy if we need to modify the data
+    if 'events' in event_ts.columns:
+        # Check if we need to convert to string
+        if event_ts['events'].dtype != 'object':
+            event_ts = event_ts.copy()
+        event_ts['events'] = event_ts['events'].astype(str)
 
 
     ############## Added by Yaman #######################################################################################################
@@ -221,38 +229,59 @@ def calc_event_spec_returns(selected_event , all_event_ts , ohcl_1h , mode , eve
     cutoff_time = pd.to_datetime('2022-12-20 00:00:00-05:00', errors='coerce')
     event_ts = event_ts[event_ts['start'] >= cutoff_time]
 
-    final_df=pd.DataFrame()
-    vol_ret = []
-    abs_ret = []
-    ret = []
+    # Pre-allocate numpy arrays for better memory efficiency
+    n_events = len(event_ts)
+    vol_ret = np.empty(n_events, dtype=np.float32)
+    abs_ret = np.empty(n_events, dtype=np.float32)
+    ret = np.empty(n_events, dtype=np.float32)
     start_date = []
     end_date = []
-
-    for end , start in zip(event_ts['end'], event_ts['start']):
-
-        temp_df = ohcl_1h[(ohcl_1h['US/Eastern Timezone'] >= start) & (ohcl_1h['US/Eastern Timezone'] < end)] #equality removed for 'end'. Otherwise 1 extra hour in taken.
+    
+    # Process events in batches to reduce memory peaks
+    batch_size = 50  # Process 50 events at a time
+    
+    for i, (end, start) in enumerate(zip(event_ts['end'], event_ts['start'])):
+        # More efficient filtering using index slicing if possible
+        mask = (ohcl_1h['US/Eastern Timezone'] >= start) & (ohcl_1h['US/Eastern Timezone'] < end)
+        temp_df = ohcl_1h.loc[mask]
         
-        if(temp_df.empty):
-            vol_ret.append(np.nan)
-            abs_ret.append(np.nan)
-            ret.append(np.nan)
+        if temp_df.empty:
+            vol_ret[i] = np.nan
+            abs_ret[i] = np.nan
+            ret[i] = np.nan
             start_date.append(np.nan)
             end_date.append(np.nan)
         else:
-            vol_ret.append((temp_df['High'].max() - temp_df['Low'].min())*16)
-            abs_ret.append(abs(temp_df['Close'].iloc[-1] - temp_df['Open'].iloc[0])*16)
-            ret.append((temp_df['Close'].iloc[-1] - temp_df['Open'].iloc[0])*16)
+            # Use numpy operations directly for speed
+            high_val = temp_df['High'].values.max()
+            low_val = temp_df['Low'].values.min()
+            close_val = temp_df['Close'].iloc[-1]
+            open_val = temp_df['Open'].iloc[0]
+            
+            vol_ret[i] = (high_val - low_val) * 16
+            abs_ret[i] = abs(close_val - open_val) * 16
+            ret[i] = (close_val - open_val) * 16
             start_date.append(temp_df['US/Eastern Timezone'].iloc[0])
             end_date.append(temp_df['US/Eastern Timezone'].iloc[-1])
-
-    final_df['Volatility Return'] = vol_ret
-    final_df['Absolute Return'] = abs_ret
-    final_df['Return'] = ret
-    final_df['Start_Date'] = start_date
-    final_df['End_Date'] = end_date
-    # print(final_df.head())
-
+        
+        # Clean up memory every batch_size iterations
+        if (i + 1) % batch_size == 0:
+            gc.collect()
+    
+    # Create DataFrame from arrays
+    final_df = pd.DataFrame({
+        'Volatility Return': vol_ret,
+        'Absolute Return': abs_ret,
+        'Return': ret,
+        'Start_Date': start_date,
+        'End_Date': end_date
+    })
+    
+    # Remove NaN values
     final_df.dropna(inplace=True)
+    
+    # Final memory cleanup
+    gc.collect()
 
     print("SELECTED EVENT: ", selected_event)
     print('No of Data points: ' , len(final_df))
@@ -1062,47 +1091,61 @@ with tab4:
 with tab5:
     st.title('Event Specific Distro')
     
-    # Define a cached function to load event data
+    # Define a cached function to load event data with memory optimization
     @st.cache_data
     def load_event_data():
-        """Load event timestamps and OHLC data once and cache it"""
+        """Load event timestamps and OHLC data with memory-efficient techniques"""
         all_event_ts = None
         ohcl_1h = None
         
-        # Load event timestamps - only the columns we need
+        # Load event timestamps - only the columns we need with optimized dtypes
         for file in os.scandir("Intraday_data_files_processed_folder_pq"):
             if file.name == "ZN_1h_events_tagged_target_tz.parquet":
+                # Load with specific dtypes to reduce memory
                 all_event_ts = pd.read_parquet(
                     file.path, 
                     engine='pyarrow',
                     columns=['timestamp', 'events']  # Only load needed columns
                 )
+                # Convert events to categorical to save memory
+                if 'events' in all_event_ts.columns:
+                    all_event_ts['events'] = all_event_ts['events'].astype('category')
                 break
         
         if all_event_ts is not None:
             all_event_ts['timestamp'] = pd.to_datetime(all_event_ts.timestamp, errors='coerce').dt.tz_localize('US/Eastern')
+            # Force garbage collection after timestamp conversion
+            gc.collect()
         
-        # Load OHLC data - only the columns we need
+        # Load OHLC data - only the columns we need with float32 precision
         pattern = re.compile(r"Intraday_data_ZN_1h_2022-12-20_to_(\d{4}-\d{2}-\d{2})\.parquet")
         for file in os.scandir('Intraday_data_files_pq'):
             if file.is_file():
                 match = pattern.match(file.name)
                 if match:
+                    # Load with float32 instead of float64 to halve memory usage
                     ohcl_1h = pd.read_parquet(
                         os.path.join("Intraday_data_files_pq", file.name), 
                         engine='pyarrow',
                         columns=['Open', 'High', 'Low', 'Close']  # Only load OHLC columns
                     )
+                    # Convert to float32
+                    for col in ['Open', 'High', 'Low', 'Close']:
+                        if col in ohcl_1h.columns:
+                            ohcl_1h[col] = ohcl_1h[col].astype('float32')
                     break
         
         if ohcl_1h is not None:
             ohcl_1h['US/Eastern Timezone'] = pd.to_datetime(ohcl_1h.index, errors='coerce', utc=True)
             ohcl_1h['US/Eastern Timezone'] = ohcl_1h['US/Eastern Timezone'].dt.tz_convert('US/Eastern')
+            # Force garbage collection after timezone conversion
+            gc.collect()
         
         return all_event_ts, ohcl_1h
     
-    # Load data once
-    all_event_ts, ohcl_1h = load_event_data()
+    # Load data once with progress indicator
+    with st.spinner('Loading event data... This may take a moment on first load.'):
+        all_event_ts, ohcl_1h = load_event_data()
     
     if all_event_ts is None or ohcl_1h is None:
         st.error("Required data files not found. Please ensure the necessary parquet files are in the correct directories.")
